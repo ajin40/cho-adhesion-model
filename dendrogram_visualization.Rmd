@@ -1,0 +1,43 @@
+---
+title: "dendrogram_visualization"
+author: "Andrew Jin"
+date: "11/28/2021"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+
+install.packages('TreeDist')
+library('TreeDist')
+library(ape)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r plot_trees}
+file_name = '/Users/andrew/PycharmProjects/tordoff_model/Outputs/dendrogram_test2_clusterthresh3/dendrogram_clusters_0.txt'
+trees_txt <- readChar(file_name, file.info(file_name)$size)
+myTree <- ape::read.tree(text=trees_txt)
+
+#print(myTree)
+
+
+plot(myTree, no.margin=FALSE, cex=0.5, label.offset = 5, direction="downwards", show.tip.label = FALSE, align.tip.label=TRUE)
+plot.window(xlim= c(0, 100), ylim=c(0,200))
+axis(2); title(xlab="Cluster", ylab="Time", main = "30% HEK")
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
