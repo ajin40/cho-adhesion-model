@@ -3,16 +3,14 @@ import random as r
 import math
 from numba import jit, prange
 from pythonabm import Simulation, record_time, template_params
-import cv2
-from numba import cuda
-import numba
 from pythonabm.backend import record_time, check_direct, template_params, check_existing, get_end_step, Graph, \
     progress_bar, starting_params, check_output_dir, assign_bins_jit, get_neighbors_cpu, get_neighbors_gpu
 
 
 @jit(nopython=True, parallel=True)
 def get_neighbor_forces(number_edges, edges, edge_forces, locations, center, types, radius, alpha=10, r_e=1.01,
-                        u_bb=5, u_rb=1, u_yb=1, u_rr=20, u_ry=12, u_yy=30):
+                        u_bb=5, u_rb=1, u_yb=1, u_rr=20, u_ry=12, u_yy=30, u_repulsion=10000):
+    sum_force = 0
     for index in range(number_edges):
         # get indices of cells in edge
         cell_1 = edges[index][0]
@@ -30,9 +28,11 @@ def get_neighbor_forces(number_edges, edges, edge_forces, locations, center, typ
         if dist == 0:
             edge_forces[index][0] = alpha * (2 * np.random.rand(3) - 1) * np.array([1, 1, 0])
             edge_forces[index][1] = alpha * (2 * np.random.rand(3) - 1) * np.array([1, 1, 0])
+            sum_force += np.linalg.norm(edge_forces[index][0])
         elif 0 < dist < 2 * radius:
-            edge_forces[index][0] = -1 * (10 ** 4) * (vec / dist)
-            edge_forces[index][1] = 1 * (10 ** 4) * (vec / dist)
+            edge_forces[index][0] = -1 * u_repulsion * (vec / dist)
+            edge_forces[index][1] = 1 * u_repulsion * (vec / dist)
+            sum_force -= np.linalg.norm(edge_forces[index][0])
         else:
             # get the cell type
             cell_1_type = types[cell_1]
@@ -42,14 +42,14 @@ def get_neighbor_forces(number_edges, edges, edge_forces, locations, center, typ
             value = (dist - r_e) * (vec / dist)
             edge_forces[index][0] = u * value + alpha * (2 * np.random.rand(3) - 1) * np.array([1, 1, 0])
             edge_forces[index][1] = -1 * u * value + alpha * (2 * np.random.rand(3) - 1) * np.array([1, 1, 0])
-    return edge_forces
+            sum_force += np.linalg.norm(edge_forces[index][0])
+    return edge_forces, sum_force
 
 
 @jit(nopython=True, parallel=True)
 def get_gravity_forces(number_cells, locations, center, well_rad, net_forces):
     for index in range(number_cells):
         new_loc = locations[index] - center
-        # net_forces[index] = -1 * (new_loc / well_rad) * np.sqrt((np.linalg.norm(new_loc) / well_rad) ** 2)
         net_forces[index] = -1 * (new_loc / well_rad) * np.sqrt(1 - (np.linalg.norm(new_loc) / well_rad) ** 2)
     return net_forces
 
@@ -71,7 +71,7 @@ def set_div_thresh(cell_type):
     """ Specify division threshold value for a particular cell.
 
         Distribution of cell division thresholds modeled by a shifted gamma distribution
-        from Stukalin et al., RSIF 2013
+        from Stukalin et. al., RSIF 2013
     """
     # parameters for gamma distribution
     alpha, a_0, beta = 12.5, 10.4, 0.72
@@ -160,53 +160,58 @@ class TestSimulation(Simulation):
         self.locations = seed_cells(self.number_agents, self.initial_seed_rad, self.size)
         self.radii = self.agent_array(initial=lambda: self.cell_rad)
 
-        # 1 is HEK293FT Cell (yellow), 0 is CHO K1 Cell (blue)
+        # Define cell types, 2 is ABA, 1 is DOX, 0 is non-cadherin expressing cho cells
         self.cell_type = self.agent_array(dtype=int, initial={"ABA": lambda: 2, "DOX": lambda: 1, "CHO": lambda: 0})
         self.colors = self.agent_array(dtype=int, vector=3, initial={"ABA": lambda: self.aba_color, "DOX": lambda: self.dox_color, "CHO": lambda: self.cho_color})
 
         # setting division times (in seconds):
-        self.div_thresh = self.agent_array(initial={"ABA": lambda: set_div_thresh(2), "DOX": lambda: set_div_thresh(1), "CHO": lambda: set_div_thresh(0)})
+        self.div_thresh = self.agent_array(initial={"ABA": lambda: set_div_thresh(0), "DOX": lambda: set_div_thresh(0), "CHO": lambda: set_div_thresh(0)})
         self.division_set = self.agent_array(initial={"ABA": lambda: 17 * 3600 * r.random(), "DOX": lambda: 17 * 3600 * r.random(), "CHO": lambda: 16 * 3600 * r.random()})
 
-        # indicate agent graphs and create the graphs for holding agent neighbors
-        self.indicate_graphs("neighbor_graph", "cluster_graph")
-        self.neighbor_graph = self.agent_graph()
-        self.cluster_graph = self.agent_graph()
+        # save parameters to text file
         self.save_params(self.yaml_name)
+
+        #indicate and create graphs for identifying neighbors
+        self.indicate_graphs("neighbor_graph")
+        self.neighbor_graph = self.agent_graph()
+
+        #I want to keep track of the total of the attraction vs repulsion forces. See if there's a steady state
+        self.track_forces = np.zeros(self.end_step)
+        self.track_counter = 0
+
         # record initial values
         self.step_values()
-        # self.get_clusters(self.cluster_threshold, self.cluster_record_interval, self.cluster_interaction_threshold)
-        self.step_image()
+        # self.step_image()
 
     def step(self):
         """ Overrides the step() method from the Simulation class.
         """
         # preform 60 subsets, each velocity / .05 seconds long
-        self.cluster_timer += 1
         for i in range(self.sub_ts):
+            # get all neighbors within threshold (1.6 * diameter)
+            self.get_neighbors(self.neighbor_graph, self.cell_interaction_rad * self.cell_rad)
             # increase division counter and determine if any cells are dividing
             self.reproduce(self.velocity/.05)
 
-            # get all neighbors within threshold (1.6 * diameter)
-            self.get_neighbors(self.neighbor_graph, self.cell_interaction_rad * self.cell_rad)
-
-            # self.get_clusters(self.cluster_threshold, self.cluster_record_interval,
-            #                   self.cluster_interaction_threshold)
-            # move the cells
+            # move the cells and track total repulsion vs adhesion forces
             self.move_parallel()
             self.noise(self.noise_magnitude)
+
             # add/remove agents from the simulation
             self.update_populations()
-        # get the following data
+        # get the following data. We can generate images at each time step, but right now that is not needed.
         self.step_values()
-        self.step_image()
+        # self.step_image()
+        self.track_counter += 1
         self.temp()
         self.data()
 
     def end(self):
         """ Overrides the end() method from the Simulation class.
         """
-        self.create_video()
+        self.save_forces()
+        self.step_values()
+        self.step_image()
 
     @record_time
     def update_populations(self):
@@ -281,33 +286,29 @@ class TestSimulation(Simulation):
         self.hatching[:] = False
         self.removing[:] = False
 
+    @record_time
     def move_parallel(self):
         edges = np.asarray(self.neighbor_graph.get_edgelist())
         num_edges = len(edges)
         edge_forces = np.zeros((num_edges, 2, 3))
         center = self.size / 2
         neighbor_forces = np.zeros((self.number_agents, 3))
-        grav_forces = np.zeros((self.number_agents, 3))
-        total_force = np.zeros((self.number_agents, 3))
-
         # get adhesive/repulsive forces from neighbors and gravity forces
-        edge_forces = get_neighbor_forces(num_edges, edges, edge_forces, self.locations, center, self.cell_type,
+        edge_forces, adhesion_repulsion_force = get_neighbor_forces(num_edges, edges, edge_forces, self.locations, center, self.cell_type,
                                           self.cell_rad, u_bb=self.u_bb, u_rb=self.u_rb, u_rr=self.u_rr, u_yb=self.u_yb,
-                                          u_ry=self.u_ry, u_yy=self.u_yy, alpha=self.alpha)
+                                          u_ry=self.u_ry, u_yy=self.u_yy, alpha=self.alpha, u_repulsion=self.u_repulsion)
         neighbor_forces = convert_edge_forces(num_edges, edges, edge_forces, neighbor_forces)
-        grav_forces = get_gravity_forces(self.number_agents, self.locations, center, self.well_rad, grav_forces)
-        total_force = neighbor_forces # + grav_forces
         for i in range(self.number_agents):
             if np.linalg.norm(neighbor_forces[i]) != 0:
-                total_force[i] = total_force[i] / np.linalg.norm(total_force[i])
+                neighbor_forces[i] = neighbor_forces[i] / np.linalg.norm(neighbor_forces[i])
             else:
-                total_force[i] = 0
-            # total_force[i] = total_force[i] / np.linalg.norm(total_force[i])
+                neighbor_forces[i] = 0
         # update locations based on forces
-        self.locations += 2 * self.velocity * self.cell_rad * total_force
+        self.locations += 2 * self.velocity * self.cell_rad * neighbor_forces
         # check that the new location is within the space, otherwise use boundary values
         self.locations = np.where(self.locations > self.well_rad, self.well_rad, self.locations)
         self.locations = np.where(self.locations < 0, 0, self.locations)
+        self.track_forces[self.track_counter] += adhesion_repulsion_force/self.number_agents
 
     @record_time
     def reproduce(self, ts):
@@ -316,21 +317,20 @@ class TestSimulation(Simulation):
         # increase division counter by time step for all agents
         self.division_set += ts
 
-        # go through all agents marking for division if over the threshold
-        for index in range(self.number_agents):
-            if self.division_set[index] > self.div_thresh[index]:
-                self.mark_to_hatch(index)
-
-    # Not used
-    def remove_overlap(self, index):
-        self.get_neighbors(self.neighbor_graph, 2*self.radii[index])
-        while len(self.neighbor_graph.neighbors(index)) > 0:
-            for neighbor_cell in self.neighbor_graph.neighbors(index):
-                mag = np.linalg.norm(self.locations[neighbor_cell] - self.locations[index])
-                vec = mag * np.random.rand(3) * self.dim
-                self.locations[index] += vec
-                self.locations[neighbor_cell] -= vec
-            self.get_neighbors(self.neighbor_graph, 2*self.radii[index])
+        #go through all agents marking for division if over the threshold
+        if self.replication_type == 'Contact_Inhibition':
+            adjacency_matrix = self.neighbor_graph.get_adjacency()
+            for index in range(self.number_agents):
+                if self.division_set[index] > self.div_thresh[index]:
+                    # 12 is the maximum number of cells that can surround a cell
+                    if np.sum(adjacency_matrix[index,:]) < 12:
+                        self.mark_to_hatch(index)
+        if self.replication_type == 'Default':
+            for index in range(self.number_agents):
+                if self.division_set[index] > self.div_thresh[index]:
+                    self.mark_to_hatch(index)
+        if self.replication_type == 'None':
+            return
 
     @classmethod
     def simulation_mode_0(cls, name, output_dir, yaml_file="general.yaml"):
@@ -349,142 +349,6 @@ class TestSimulation(Simulation):
     def noise(self, alpha):
         self.locations += alpha * 2 * self.cell_rad * np.random.normal(size=(self.number_agents, 3)) * self.dim
 
-    def get_clusters(self, cluster_threshold, time_thresh, cluster_distance):
-        # Create graphs of specified distance.
-        if self.cluster_timer % time_thresh == 0:
-            self.get_neighbors_clusters(self.cluster_graph, cluster_distance * self.cell_rad)
-            # Identify unique clusters in graph
-            clusters = self.cluster_graph.clusters()
-            file_name = f"{self.name}_values_{self.current_step}_clusters.csv"
-            cluster_file = open(self.values_path + file_name, "w")
-            if len(clusters) > 0:
-                centroids = np.zeros([len(clusters),3])
-                radius = np.zeros(len(clusters))
-                # Calculate Mean
-                for i in range(len(clusters)):
-                    if len(clusters[i]) > cluster_threshold:
-                        location_graph = self.locations[clusters[i]]
-                        centroids[i] = np.mean(location_graph,0)
-                        max_distance = 0
-                        # and Radius for circles
-                        for j in range(len(clusters[i])):
-                            if np.linalg.norm(location_graph[j]-centroids[i]) > max_distance:
-                                max_distance = np.linalg.norm(location_graph[j]-centroids[i])
-                        radius[i] = max_distance
-                        cluster_file.write(f"{centroids[i][0]}, {centroids[i][1]}, {centroids[i][2]}, {radius[i]}\n")
-                if len(centroids > 0):
-                    self.step_image_cluster(centroids, radius)
-            cluster_file.close()
-
-
-    @record_time
-    def step_image_cluster(self, centroids, radius, background=(0, 0, 0), origin_bottom=True):
-        """ Creates an image of the simulation space with a cluster overlay.
-        """
-        # only continue if outputting images
-        if self.output_images:
-            # get path and make sure directory exists
-
-
-            # get the size of the array used for imaging in addition to the scaling factor
-            x_size = self.image_quality
-            scale = x_size / self.size[0]
-            y_size = math.ceil(scale * self.size[1])
-
-            # create the agent space background image and apply background color
-            image = np.zeros((y_size, x_size, 3), dtype=np.uint8)
-            background = (background[2], background[1], background[0])
-            image[:, :] = background
-
-            # go through all of the agents
-            for index in range(self.number_agents):
-                # get xy coordinates, the axis lengths, and color of agent
-                x, y = int(scale * self.locations[index][0]), int(scale * self.locations[index][1])
-                major, minor = int(scale * self.radii[index]), int(scale * self.radii[index])
-                color = (int(self.colors[index][2]), int(self.colors[index][1]), int(self.colors[index][0]))
-
-                # draw the agent and a black outline to distinguish overlapping agents
-                image = cv2.ellipse(image, (x, y), (major, minor), 0, 0, 360, color, -1)
-                image = cv2.ellipse(image, (x, y), (major, minor), 0, 0, 360, (0, 0, 0), 1)
-            for i in range(len(centroids)):
-                x = int(scale * centroids[i, 0])
-                y = int(scale * centroids[i, 1])
-                rad = int(radius[i] * scale)
-                image = cv2.ellipse(image, (x, y), (rad, rad), 0, 0, 360, (0, 0, 255), 3)
-            # if the origin should be bottom-left flip it, otherwise it will be top-left
-            if origin_bottom:
-                image = cv2.flip(image, 0)
-
-            # save the image as a PNG
-            image_compression = 4  # image compression of png (0: no compression, ..., 9: max compression)
-            file_name = f"{self.name}_image_{self.current_step}_cluster.png"
-            cv2.imwrite(self.images_path + file_name, image, [cv2.IMWRITE_PNG_COMPRESSION, image_compression])
-
-    @record_time
-    def get_neighbors_clusters(self, graph, distance, clear=True):
-        """ Finds all neighbors, within fixed radius, for each each agent.
-        """
-        # get graph object reference and if desired, remove all existing edges in the graph
-        if clear:
-            graph.delete_edges(None)
-
-        # don't proceed if no agents present
-        if np.sum(self.cell_type) == 0:
-            return
-
-        # assign each of the agents to bins, updating the max agents in a bin (if necessary)
-        bins, bins_help, bin_locations, graph.max_agents = self.assign_bins(graph.max_agents, distance)
-
-        # run until all edges are accounted for
-        while True:
-            # get the total amount of edges able to be stored and make the following arrays
-            # We are only looking at HEK cells here
-            length = np.sum(self.cell_type) * graph.max_neighbors
-            edges = np.zeros((length, 2), dtype=int)         # hold all edges
-            if_edge = np.zeros(length, dtype=bool)                 # say if each edge exists
-            edge_count = np.zeros(np.sum(self.cell_type), dtype=int)   # hold count of edges per agent
-
-            # if using CUDA GPU
-            if self.cuda:
-                # allow the following arrays to be passed to the GPU
-                edges = cuda.to_device(edges)
-                if_edge = cuda.to_device(if_edge)
-                edge_count = cuda.to_device(edge_count)
-
-                # specify threads-per-block and blocks-per-grid values
-                tpb = 72
-                bpg = math.ceil(self.number_agents / tpb)
-
-                # call the CUDA kernel, sending arrays to GPU
-                get_neighbors_gpu[bpg, tpb](cuda.to_device(self.locations), cuda.to_device(bin_locations),
-                                            cuda.to_device(bins), cuda.to_device(bins_help), distance, edges, if_edge,
-                                            edge_count, graph.max_neighbors)
-
-                # return the following arrays back from the GPU
-                edges = edges.copy_to_host()
-                if_edge = if_edge.copy_to_host()
-                edge_count = edge_count.copy_to_host()
-
-            # otherwise use parallelized JIT function
-            else:
-                edges, if_edge, edge_count = get_neighbors_cpu(np.sum(self.cell_type),  self.locations[self.cell_type==1], bin_locations, bins,
-                                                               bins_help, distance, edges, if_edge, edge_count,
-                                                               graph.max_neighbors)
-
-            # break the loop if all neighbors were accounted for or revalue the maximum number of neighbors
-            max_neighbors = np.amax(edge_count)
-            if graph.max_neighbors >= max_neighbors:
-                break
-            else:
-                graph.max_neighbors = max_neighbors * 2
-
-        # reduce the edges to edges that actually exist and add those edges to graph
-        graph.add_edges(edges[if_edge])
-
-        # simplify the graph's edges if not clearing the graph at the start
-        if not clear:
-            graph.simplify()
-
     def save_params(self, path):
         """ Add the instance variables to the Simulation object based
             on the keys and values from a YAML file.
@@ -497,6 +361,12 @@ class TestSimulation(Simulation):
             for key in list(params.keys()):
                 parameters.write(f"{key}: {params[key]}\n")
         parameters.close()
+
+    def save_forces(self):
+        with open(self.main_path + "forces.txt", "w") as file:
+            for i in range(len(self.track_forces)):
+                file.write(f'{i}, {self.track_forces[i]/60}\n')
+        file.close()
 
     @classmethod
     def start_sweep(cls, output_dir, yaml_file, name, mode):
@@ -526,6 +396,7 @@ class TestSimulation(Simulation):
                 cls.simulation_mode_3(name, output_dir)    # archive simulation
             else:
                 raise Exception("Mode does not exist!")
+
 
 if __name__ == "__main__":
     TestSimulation.start("/Users/andrew/PycharmProjects/CHO_adhesion_model/outputs/")
