@@ -1,7 +1,6 @@
 import os
 import sys
 import model
-import numpy as np
 from multiprocessing import Pool
 
 
@@ -17,5 +16,6 @@ if __name__ == "__main__":
     num_processes = int(sys.argv[2])
     os.chdir(directory)
     yaml_array = os.listdir(directory + "/yaml_parameters")
+    yaml_array = [s for s in yaml_array if ".yaml" in s]
     with Pool(processes=num_processes) as pool:
         pool.map(parameter_sweep, yaml_array)

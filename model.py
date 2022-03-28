@@ -204,7 +204,7 @@ class TestSimulation(Simulation):
         # self.step_image()
         self.track_counter += 1
         self.temp()
-        self.data()
+        # self.data()
 
     def end(self):
         """ Overrides the end() method from the Simulation class.
@@ -378,7 +378,12 @@ class TestSimulation(Simulation):
 
         # new simulation
         if mode == 0:
-            # first check that new simulation can be made and run that mode
+            # first check that new simulation can be made and run that mode.
+            # i = 0
+            # while os.path.isdir(output_dir + name):
+            #     name = name + f'_{i}'
+            #     i += 1
+            print(f'Starting {name} ...')
             name = check_existing(name, output_dir, new_simulation=True)
             cls.simulation_mode_0(name, output_dir, yaml_file=yaml_file)
 
@@ -400,4 +405,5 @@ class TestSimulation(Simulation):
 
 if __name__ == "__main__":
     TestSimulation.start("/Users/andrew/PycharmProjects/CHO_adhesion_model/outputs/")
+    # TestSimulation.start("/Users/andrew/PycharmProjects/pace_outputs")
     #TestSimulation.start("C:\\Research\\Code\\Tordoff_model_outputs")

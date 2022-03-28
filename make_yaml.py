@@ -8,12 +8,12 @@ list_params = ["num_to_start","cuda","sub_ts","size","well_rad",
                "cluster_timer","u_bb","u_rb","u_yb","u_rr","alpha", "u_repulsion"]
 test_params = ["dox_ratio","aba_ratio","u_yy","u_ry","replication_type", "end_step"]
 
-def make_yaml(directory, default=True):
-    dox_ratio = get_ratios(directory, "dox")
-    aba_ratio = get_ratios(directory, "aba")
+def make_yaml(directory, replicate, default=True):
+    dox_ratio = get_ratios(directory, "dox", replicate)
+    aba_ratio = get_ratios(directory, "aba", replicate)
     u_yy = [40]
     u_ry = [10]
-    replication_type = ['Default', 'None']
+    replication_type = ['None']
     os.chdir(directory + "/yaml_parameters")
     if default:
         with open("../template.yaml") as template_file:
@@ -23,7 +23,7 @@ def make_yaml(directory, default=True):
                     for ry_param in u_ry:
                         for rep_param in replication_type:
                             #with open(f"{i}dox_aba_{yy_param}yy_{ry_param}ry.yaml", "w") as yaml_file:
-                            with open(f"{i}_dox_aba_{rep_param}_replication.yaml", "w") as yaml_file:
+                            with open(f"{i}_dox_aba_{replicate}_{rep_param}_replication.yaml", "w") as yaml_file:
                                 for line in template_lines:
                                     yaml_file.write(line)
                                 yaml_file.write(f'\ndox_ratio: {dox_ratio[i]}\n')
@@ -42,10 +42,12 @@ def make_yaml(directory, default=True):
     else:
         print('not currently available')
 
-def get_ratios(directory, cell_type):
+def get_ratios(directory, cell_type, replicate):
     os.chdir(directory)
-    ratio = np.loadtxt(f"channel_intensities_{cell_type}.csv", delimiter=',', encoding='utf-8-sig')
+    ratio = np.loadtxt(f"channel_intensities_{cell_type}_{replicate}.csv", delimiter=',', encoding='utf-8-sig')
     return ratio
 
 if __name__ == "__main__":
-    make_yaml("/Users/andrew/PycharmProjects/CHO_adhesion_model")
+    make_yaml("/Users/andrew/PycharmProjects/CHO_adhesion_model", 0)
+    make_yaml("/Users/andrew/PycharmProjects/CHO_adhesion_model", 1)
+    make_yaml("/Users/andrew/PycharmProjects/CHO_adhesion_model", 2)

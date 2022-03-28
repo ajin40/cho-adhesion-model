@@ -41,7 +41,7 @@ noise_ratio: 0.25
 initial_seed_ratio: 0.01
 cell_interaction_rad: 3.2
 
-# cluster identification parameters
+# cluster identification parameters. Not currently used.
 cluster_threshold: 3
 cluster_interaction_threshold: 3.2
 cluster_record_interval: 5
@@ -58,4 +58,6 @@ u_ry: 10
 u_yy: 40
 u_repulsion: 10000
 alpha: 10
+
+#Replication Type: None is no replication, Default is replication
 replication_type: None
